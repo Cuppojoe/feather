@@ -2,7 +2,6 @@ package panels
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	"charm.land/lipgloss/v2"
@@ -667,27 +666,14 @@ func (p *ProfilePanel) renderDetails(contentWidth int) string {
 		p.writeEditableField(&b, "spec", editSpec, sel.SpecPath, contentWidth)
 		p.writeEditableField(&b, "base url", editBaseURL, sel.BaseURL, contentWidth)
 
-		// Context (read-only summary).
-		if len(sel.Context) > 0 {
-			b.WriteString(shared.DimStyle.Render("context:"))
-			b.WriteString("\n")
-			keys := make([]string, 0, len(sel.Context))
-			for k := range sel.Context {
-				keys = append(keys, k)
-			}
-			sort.Strings(keys)
-			for _, k := range keys {
-				b.WriteString("  ")
-				b.WriteString(shared.NormalStyle.Render(k))
-				b.WriteString(" = ")
-				b.WriteString(sel.Context[k])
-				b.WriteString("\n")
-			}
-		} else {
-			b.WriteString(shared.DimStyle.Render("context: "))
+		// Active environment (read-only — switch via E from anywhere).
+		b.WriteString(shared.DimStyle.Render("environment: "))
+		if sel.ActiveEnvironment == "" {
 			b.WriteString(shared.DimStyle.Render("(none)"))
-			b.WriteString("\n")
+		} else {
+			b.WriteString(shared.NormalStyle.Render(sel.ActiveEnvironment))
 		}
+		b.WriteString("\n")
 
 	}
 

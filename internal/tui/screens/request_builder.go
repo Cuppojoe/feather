@@ -649,6 +649,39 @@ func (r *RequestBuilder) SetExecuting(executing bool) {
 	r.executing = executing
 }
 
+// RefreshFromContext re-pulls path / query param values from the live
+// context. Used when the active environment changes so an already-open
+// request reflects the new variables without forcing the user to back
+// out and re-enter the request.
+//
+// Rules:
+//   - Values whose `fromContext` flag is set track the context — refresh.
+//   - Values the user manually edited (fromContext flipped false) are
+//     left alone so a typed-in override isn't clobbered by an env swap.
+//   - Params that currently have NO value but the new context supplies
+//     one get filled and marked as context-sourced, so newly added env
+//     vars populate empty fields without any prompting.
+func (r *RequestBuilder) RefreshFromContext() {
+	refresh := func(name string) {
+		if r.fromContext[name] {
+			r.values[name] = r.context.Get(name)
+			return
+		}
+		if r.values[name] == "" {
+			if v := r.context.Get(name); v != "" {
+				r.values[name] = v
+				r.fromContext[name] = true
+			}
+		}
+	}
+	for _, p := range r.pathParams {
+		refresh(p.Name)
+	}
+	for _, p := range r.queryParams {
+		refresh(p.Name)
+	}
+}
+
 // buildRequest builds the HTTP request
 func (r *RequestBuilder) buildRequest() *http.Request {
 	builder := http.NewRequestBuilder(r.endpoint)

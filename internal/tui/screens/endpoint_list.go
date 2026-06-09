@@ -500,6 +500,39 @@ func (e *EndpointList) View(width, height int) string {
 		startIdx = e.cursor - listHeight + 1
 	}
 
+	// Size the path column to fit the widest path in the visible window
+	// (so paths aren't chopped while empty space sits to their right),
+	// while reserving a minimum for the summary column. Long paths only
+	// truncate when there's truly no room left.
+	const (
+		colCursor       = 2
+		colMethod       = 8
+		colPathPaddingR = 2
+		minSummaryWidth = 24
+		minPathWidth    = 16
+	)
+	available := width - colCursor - colMethod - colPathPaddingR
+	if available < minPathWidth+minSummaryWidth {
+		available = minPathWidth + minSummaryWidth
+	}
+	widestPath := minPathWidth
+	for i := startIdx; i < len(e.filtered) && i < startIdx+listHeight; i++ {
+		if w := lipgloss.Width(e.filtered[i].Path); w > widestPath {
+			widestPath = w
+		}
+	}
+	pathColWidth := widestPath
+	if maxPath := available - minSummaryWidth; pathColWidth > maxPath {
+		pathColWidth = maxPath
+	}
+	if pathColWidth < minPathWidth {
+		pathColWidth = minPathWidth
+	}
+	summaryWidth := available - pathColWidth
+	if summaryWidth < minSummaryWidth {
+		summaryWidth = minSummaryWidth
+	}
+
 	// Build table rows
 	var rows [][]string
 	for i := startIdx; i < len(e.filtered) && i < startIdx+listHeight; i++ {
@@ -509,7 +542,7 @@ func (e *EndpointList) View(width, height int) string {
 			cursor = ">"
 		}
 
-		summary := shared.TruncateWithEllipsis(ep.Summary, width-60)
+		summary := shared.TruncateWithEllipsis(ep.Summary, summaryWidth)
 		if ep.Deprecated {
 			summary = "[DEPRECATED] " + summary
 		}
@@ -517,7 +550,7 @@ func (e *EndpointList) View(width, height int) string {
 		rows = append(rows, []string{
 			cursor,
 			ep.Method,
-			shared.TruncateWithEllipsis(ep.Path, 40),
+			shared.TruncateWithEllipsis(ep.Path, pathColWidth),
 			summary,
 		})
 	}

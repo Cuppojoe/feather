@@ -12,14 +12,18 @@ import (
 )
 
 // Profile represents a named configuration tied to a specific OpenAPI spec.
+// Variables live exclusively in Environments — the profile just remembers
+// which one is active so switching profiles also restores their last
+// chosen variable bundle.
+//
 // Auth is intentionally absent — users assemble their own auth flow with
 // pre-request scripts in the Scripts modal (feather.context for storage,
 // feather.fetch for token endpoints, feather.request.headers to inject).
 type Profile struct {
-	Name     string            `yaml:"name"`
-	SpecPath string            `yaml:"spec_path"`
-	BaseURL  string            `yaml:"base_url,omitempty"`
-	Context  map[string]string `yaml:"context,omitempty"`
+	Name              string `yaml:"name"`
+	SpecPath          string `yaml:"spec_path"`
+	BaseURL           string `yaml:"base_url,omitempty"`
+	ActiveEnvironment string `yaml:"active_environment,omitempty"`
 }
 
 // Config is a backwards-compatibility alias for Profile so existing call sites
@@ -115,10 +119,7 @@ func ProfilePath(name string) (string, error) {
 
 // NewProfile creates a new empty profile.
 func NewProfile(name string) *Profile {
-	return &Profile{
-		Name:    name,
-		Context: make(map[string]string),
-	}
+	return &Profile{Name: name}
 }
 
 // NewConfig is kept for backwards compatibility with existing call sites.
@@ -142,9 +143,6 @@ func LoadProfile(name string) (*Profile, error) {
 	}
 	if p.Name == "" {
 		p.Name = name
-	}
-	if p.Context == nil {
-		p.Context = make(map[string]string)
 	}
 	return &p, nil
 }
@@ -262,17 +260,11 @@ func CopyProfile(srcName, dstName string) error {
 		return fmt.Errorf("loading source profile: %w", err)
 	}
 
-	// Deep-copy mutable maps so the new profile's later edits don't reach
-	// back into the source via shared backing storage.
-	ctxCopy := make(map[string]string, len(src.Context))
-	for k, v := range src.Context {
-		ctxCopy[k] = v
-	}
 	dst := &Profile{
-		Name:     dstName,
-		SpecPath: src.SpecPath,
-		BaseURL:  src.BaseURL,
-		Context:  ctxCopy,
+		Name:              dstName,
+		SpecPath:          src.SpecPath,
+		BaseURL:           src.BaseURL,
+		ActiveEnvironment: src.ActiveEnvironment,
 	}
 
 	// If the source's spec is vendored under its own profile dir, copy
@@ -515,9 +507,6 @@ func (i *Index) Save() error {
 // LoadDefault loads the default profile if one is configured. Returns nil
 // (without error) if no default is set.
 func LoadDefault() (*Profile, error) {
-	if err := MigrateLegacyConfig(); err != nil {
-		return nil, err
-	}
 	idx, err := LoadIndex()
 	if err != nil {
 		return nil, err
@@ -536,29 +525,6 @@ func SetDefaultProfile(name string) error {
 	}
 	idx.DefaultProfile = name
 	return idx.Save()
-}
-
-// SetContextValue sets a context value
-func (p *Profile) SetContextValue(key, value string) {
-	if p.Context == nil {
-		p.Context = make(map[string]string)
-	}
-	p.Context[key] = value
-}
-
-// GetContextValue gets a context value
-func (p *Profile) GetContextValue(key string) string {
-	if p.Context == nil {
-		return ""
-	}
-	return p.Context[key]
-}
-
-// DeleteContextValue removes a context value
-func (p *Profile) DeleteContextValue(key string) {
-	if p.Context != nil {
-		delete(p.Context, key)
-	}
 }
 
 // resolveSpecPath returns the canonical absolute path for affinity matching.
@@ -603,74 +569,4 @@ func SuggestProfileName(specPath string) string {
 	base := filepath.Base(specPath)
 	base = strings.TrimSuffix(base, filepath.Ext(base))
 	return sanitizeName(base)
-}
-
-// MigrateLegacyConfig copies a pre-profile config at ~/.config/feather/config.yaml
-// into ~/.feather/profiles/default.yaml the first time we see it. No-op if the
-// new layout already exists or the legacy file is missing.
-func MigrateLegacyConfig() error {
-	root, err := FeatherDir()
-	if err != nil {
-		return err
-	}
-	if _, err := os.Stat(root); err == nil {
-		return nil // ~/.feather already exists; assume already migrated
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	legacyPath := filepath.Join(homeDir, ".config", "feather", "config.yaml")
-	legacyData, err := os.ReadFile(legacyPath)
-	if err != nil {
-		return nil // no legacy file; nothing to do
-	}
-
-	// Parse legacy structure (had default_spec at the top level). Auth/token
-	// fields in legacy configs are ignored — feather no longer ships a
-	// built-in auth feature; users assemble it themselves with scripts.
-	type legacyConfig struct {
-		DefaultSpec string            `yaml:"default_spec,omitempty"`
-		BaseURL     string            `yaml:"base_url,omitempty"`
-		Context     map[string]string `yaml:"context,omitempty"`
-	}
-	var legacy legacyConfig
-	if err := yaml.Unmarshal(legacyData, &legacy); err != nil {
-		return fmt.Errorf("parsing legacy config: %w", err)
-	}
-
-	name := "default"
-	if legacy.DefaultSpec != "" {
-		name = SuggestProfileName(legacy.DefaultSpec)
-		if name == "default" || name == "" {
-			name = SuggestProfileName(legacy.DefaultSpec)
-		}
-	}
-	p := &Profile{
-		Name:     name,
-		SpecPath: legacy.DefaultSpec,
-		BaseURL:  legacy.BaseURL,
-		Context:  legacy.Context,
-	}
-	if p.Context == nil {
-		p.Context = make(map[string]string)
-	}
-	if err := p.Save(); err != nil {
-		return fmt.Errorf("migrating profile: %w", err)
-	}
-	idx := &Index{DefaultProfile: name}
-	if err := idx.Save(); err != nil {
-		return fmt.Errorf("writing index: %w", err)
-	}
-
-	legacyHistory := filepath.Join(homeDir, ".config", "feather", "history.json")
-	if data, err := os.ReadFile(legacyHistory); err == nil {
-		if newPath, err := profileHistoryPath(name); err == nil {
-			_ = os.MkdirAll(filepath.Dir(newPath), 0o755)
-			_ = os.WriteFile(newPath, data, 0o644)
-		}
-	}
-
-	return nil
 }

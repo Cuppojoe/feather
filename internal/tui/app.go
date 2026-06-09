@@ -23,7 +23,6 @@ import (
 // App is the main application model with multi-panel layout
 type App struct {
 	// Panel components
-	contextPanel *panels.ContextPanel
 	mainViewport *panels.MainViewport
 	requestPanel *panels.RequestPanel
 	historyPanel *panels.HistoryPanel
@@ -33,6 +32,7 @@ type App struct {
 	scriptsPanel *panels.ScriptsPanel
 	helpPanel    *panels.HelpPanel
 	confirm      *panels.ConfirmPanel
+	envPanel     *panels.EnvironmentPanel
 
 	// Focus management
 	focusedPanel string
@@ -75,19 +75,26 @@ func NewApp(base *openapi.ParsedSpec, cfg *config.Config, ov *overlay.Overlay) *
 	spec := overlay.Apply(base, ov)
 	ctx := models.NewContext()
 
-	// Resolve cross-references between context values up front. ${other}
-	// inside a value follows the reference graph; cycles get reported so
-	// the user can fix them without the app starting in a wedged state.
-	// On error we still populate the context with the raw values so
-	// everything else works — the error is surfaced via the status bar.
+	// Load the active environment's values into the runtime context.
+	// Environments are the only source of variables — when one is set,
+	// its Values feed every templated header / base URL / script
+	// reference, and ${other} cross-references inside values are
+	// resolved up front. Cycles surface via ctxErr so the user can fix
+	// them without the app starting in a wedged state.
+	var raw map[string]string
+	if cfg.ActiveEnvironment != "" {
+		if env, err := config.LoadEnvironment(cfg.ActiveEnvironment); err == nil {
+			raw = env.PlainValues()
+		}
+	}
 	var ctxErr error
-	if resolved, err := models.Resolve(cfg.Context); err == nil {
+	if resolved, err := models.Resolve(raw); err == nil {
 		for k, v := range resolved {
 			ctx.Set(k, v)
 		}
 	} else {
 		ctxErr = err
-		for k, v := range cfg.Context {
+		for k, v := range raw {
 			ctx.Set(k, v)
 		}
 	}
@@ -105,16 +112,16 @@ func NewApp(base *openapi.ParsedSpec, cfg *config.Config, ov *overlay.Overlay) *
 	keys := shared.DefaultKeyMap()
 
 	// Create panels
-	contextPanel := panels.NewContextPanel(spec.PathVariables, ctx, keys)
 	historyPanel := panels.NewHistoryPanel(keys)
 	requestPanel := panels.NewRequestPanel(keys)
-	mainViewport := panels.NewMainViewport(spec, ctx, contextPanel, keys, ov)
+	mainViewport := panels.NewMainViewport(spec, ctx, keys, ov)
 	profilePanel := panels.NewProfilePanel(cfg.Name, keys)
 	opEditor := panels.NewOpEditorPanel(keys)
 	categoryForm := panels.NewCategoryFormPanel()
 	confirm := panels.NewConfirmPanel()
 	scriptsPanel := panels.NewScriptsPanel(keys)
 	helpPanel := panels.NewHelpPanel()
+	envPanel := panels.NewEnvironmentPanel(keys)
 
 	//Requet and history reference each other
 	historyPanel.LinkRequestPanel(requestPanel)
@@ -125,7 +132,6 @@ func NewApp(base *openapi.ParsedSpec, cfg *config.Config, ov *overlay.Overlay) *
 
 	app := &App{
 		err:          ctxErr,
-		contextPanel: contextPanel,
 		mainViewport: mainViewport,
 		requestPanel: requestPanel,
 		historyPanel: historyPanel,
@@ -135,6 +141,7 @@ func NewApp(base *openapi.ParsedSpec, cfg *config.Config, ov *overlay.Overlay) *
 		confirm:      confirm,
 		scriptsPanel: scriptsPanel,
 		helpPanel:    helpPanel,
+		envPanel:     envPanel,
 		focusedPanel: "main",
 		baseSpec:     base,
 		spec:         spec,
@@ -184,11 +191,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// If context modal is open, capture all mouse events
-		if a.contextPanel.IsExpanded() {
-			return a.updateContextModal(msg)
-		}
-
 		// If profile modal is open, swallow mouse events.
 		if a.profilePanel.IsExpanded() {
 			return a, nil
@@ -203,6 +205,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// drag selection, scrollbar drag, and wheel scroll all work
 			// inside the modal — same pattern as the help modal below.
 			return a.updateScriptsModal(msg)
+		}
+		if a.envPanel.IsExpanded() {
+			return a.updateEnvironmentModal(msg)
 		}
 		// Help modal absorbs mouse so the body can scroll / be clicked.
 		if a.helpPanel.IsExpanded() {
@@ -222,11 +227,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
-		// If context modal is open, capture ALL keyboard input
-		if a.contextPanel.IsExpanded() {
-			return a.updateContextModal(msg)
-		}
-
 		// If profile modal is open, capture ALL keyboard input
 		if a.profilePanel.IsExpanded() {
 			return a.updateProfileModal(msg)
@@ -244,6 +244,9 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if a.scriptsPanel.IsExpanded() {
 			return a.updateScriptsModal(msg)
+		}
+		if a.envPanel.IsExpanded() {
+			return a.updateEnvironmentModal(msg)
 		}
 		// Help modal opens on top of everything else.
 		if a.helpPanel.IsExpanded() {
@@ -277,12 +280,6 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.cycleFocus(-1)
 			return a, nil
 
-		case key.Matches(msg, a.keys.Context):
-			// Open context modal
-			a.contextPanel.Toggle()
-			a.contextPanel.SetFocused(true)
-			return a, nil
-
 		case key.Matches(msg, a.keys.Profile):
 			// Open profile switcher modal
 			a.profilePanel.Toggle()
@@ -299,6 +296,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Global Help modal. Opens with the section list; pick a topic
 			// to read.
 			a.helpPanel.Toggle()
+			return a, nil
+
+		case key.Matches(msg, a.keys.EnvList):
+			// Open the Environments modal — swappable named contexts that
+			// overlay the profile's Context (Postman-style environments).
+			a.envPanel.Open(a.config.ActiveEnvironment)
 			return a, nil
 
 		case msg.String() == "e" && a.err != nil && a.errFull != "":
@@ -475,6 +478,87 @@ func (a *App) updateScriptsModal(msg tea.Msg) (*App, tea.Cmd) {
 	return a, result.Cmd
 }
 
+// updateEnvironmentModal forwards translated input to the Environments
+// modal and reacts to its result intents (switch active env, persist a
+// just-saved env's values).
+func (a *App) updateEnvironmentModal(msg tea.Msg) (*App, tea.Cmd) {
+	mw := min(92, a.width-8)
+	mh := min(26, a.height-6)
+	msg = translateModalMouse(msg, (a.width-mw)/2, (a.height-mh)/2)
+	result := a.envPanel.Update(msg)
+	if result.SetActive {
+		name := result.ActiveName
+		if result.ActiveCleared {
+			name = ""
+		}
+		a.applyActiveEnvironment(name)
+	}
+	if result.Saved && result.SavedEnv != nil {
+		// If the just-saved env is the active one, re-merge so the new
+		// values land in the live context immediately.
+		if result.SavedEnv.Name == a.config.ActiveEnvironment {
+			a.applyActiveEnvironment(result.SavedEnv.Name)
+		}
+	}
+	return a, result.Cmd
+}
+
+// applyActiveEnvironment switches the active environment by name (empty
+// means "no env"), updates the profile's stored ActiveEnvironment field,
+// persists the profile, and rebuilds the live context. On any failure the
+// error lands in the status bar but the app keeps running.
+func (a *App) applyActiveEnvironment(name string) {
+	a.config.ActiveEnvironment = name
+	if err := a.config.SaveDefault(); err != nil {
+		a.err = fmt.Errorf("saving active environment: %w", err)
+	}
+
+	var raw map[string]string
+	if name != "" {
+		env, err := config.LoadEnvironment(name)
+		if err != nil {
+			a.err = fmt.Errorf("loading environment %q: %w", name, err)
+			return
+		}
+		raw = env.PlainValues()
+	}
+
+	// Wipe + repopulate so values removed in the new env disappear.
+	for k := range a.appCtx.Values {
+		delete(a.appCtx.Values, k)
+	}
+	if resolved, err := models.Resolve(raw); err == nil {
+		for k, v := range resolved {
+			a.appCtx.Set(k, v)
+		}
+	} else {
+		a.err = err
+		for k, v := range raw {
+			a.appCtx.Set(k, v)
+		}
+	}
+
+	// Re-resolve BaseURL against the fresh context so templates like
+	// "https://${host}/v1" pick up env changes.
+	baseURL := a.config.BaseURL
+	if baseURL == "" && a.spec != nil {
+		baseURL = a.spec.BaseURL
+	}
+	a.appCtx.BaseURL = models.Substitute(baseURL, a.appCtx.Values)
+
+	// Push the new values into whatever request the user has open so
+	// path / query params reflect the change without an exit + re-enter.
+	if a.mainViewport != nil {
+		a.mainViewport.RefreshContext()
+	}
+
+	if name == "" {
+		a.statusMsg = "environment cleared"
+	} else {
+		a.statusMsg = fmt.Sprintf("environment: %s", name)
+	}
+}
+
 // updateOpEditorModal handles input while the request editor is open. On save
 // it writes the overlay (added op or imported override) and rebuilds.
 func (a *App) updateOpEditorModal(msg tea.Msg) (*App, tea.Cmd) {
@@ -589,60 +673,6 @@ func tagOf(ep *openapi.Endpoint) string {
 	return ""
 }
 
-// updateContextModal handles all input when context modal is open
-
-// updateContextModal handles all input when context modal is open
-func (a *App) updateContextModal(msg tea.Msg) (*App, tea.Cmd) {
-	var cmd tea.Cmd
-
-	// Handle closing the modal
-	if keyMsg, ok := msg.(tea.KeyMsg); ok {
-		if key.Matches(keyMsg, a.keys.Back) && !a.contextPanel.IsEditing() {
-			a.contextPanel.Toggle()
-			return a, nil
-		}
-	}
-
-	// Translate mouse events to modal-content coordinates.
-	mw := min(70, a.width-8)
-	mh := min(20, a.height-8)
-	msg = translateModalMouse(msg, (a.width-mw)/2, (a.height-mh)/2)
-
-	// A click on a footer shortcut runs it. "esc" closes the modal (handled
-	// here, since the panel can't close itself); others replay as a keypress.
-	if mm, ok := msg.(tea.MouseMsg); ok &&
-		mm.Button == tea.MouseButtonLeft && mm.Action == tea.MouseActionRelease {
-		if k, ok := a.contextPanel.FooterHintAt(mm.X, mm.Y); ok {
-			if k == "esc" {
-				if !a.contextPanel.IsEditing() {
-					a.contextPanel.Toggle()
-				}
-				return a, nil
-			}
-			msg = shared.KeyMsgFromName(k)
-		}
-	}
-
-	// Forward all input to context panel
-	result := a.contextPanel.Update(msg)
-	cmd = result.Cmd
-
-	if result.Save {
-		// Update config with new values
-		for k, v := range result.Values {
-			a.appCtx.Set(k, v)
-			a.config.SetContextValue(k, v)
-		}
-		if err := a.config.SaveDefault(); err != nil {
-			a.err = err
-		} else {
-			a.statusMsg = "Context saved"
-		}
-	}
-
-	return a, cmd
-}
-
 // handleMouseFocus determines which panel was clicked and focuses it
 func (a *App) handleMouseFocus(msg tea.MouseMsg) {
 	// Account for header
@@ -740,7 +770,6 @@ func (a *App) rebuild(focusTag string) {
 	if err := a.persistOverlay(); err != nil {
 		a.err = err
 	}
-	a.contextPanel.SetPathVariables(a.spec.PathVariables)
 	a.mainViewport.RefreshSpec(a.spec, focusTag)
 }
 
@@ -1095,16 +1124,6 @@ func (a *App) View() string {
 	var layers []*lipgloss.Layer
 	layers = append(layers, lipgloss.NewLayer(baseView))
 
-	// Context modal at Z=1
-	if a.contextPanel.IsExpanded() {
-		modalContent := a.contextPanel.ViewModal(a.width, a.height)
-		modalWidth := min(70, a.width-8)
-		modalHeight := min(20, a.height-8)
-		modalX := (a.width - modalWidth) / 2
-		modalY := (a.height - modalHeight) / 2
-		layers = append(layers, lipgloss.NewLayer(modalContent).X(modalX).Y(modalY).Z(1))
-	}
-
 	// Profile switcher modal at Z=1
 	if a.profilePanel.IsExpanded() {
 		modalContent := a.profilePanel.ViewModal(a.width, a.height)
@@ -1130,6 +1149,16 @@ func (a *App) View() string {
 		modalContent := a.scriptsPanel.ViewModal(a.width, a.height)
 		modalWidth := min(100, a.width-8)
 		modalHeight := min(30, a.height-6)
+		modalX := (a.width - modalWidth) / 2
+		modalY := (a.height - modalHeight) / 2
+		layers = append(layers, lipgloss.NewLayer(modalContent).X(modalX).Y(modalY).Z(1))
+	}
+
+	// Environments modal at Z=1
+	if a.envPanel.IsExpanded() {
+		modalContent := a.envPanel.ViewModal(a.width, a.height)
+		modalWidth := min(92, a.width-8)
+		modalHeight := min(26, a.height-6)
 		modalX := (a.width - modalWidth) / 2
 		modalY := (a.height - modalHeight) / 2
 		layers = append(layers, lipgloss.NewLayer(modalContent).X(modalX).Y(modalY).Z(1))
@@ -1280,6 +1309,15 @@ func (a *App) buildProfileBar() string {
 	wordmark := shared.Rainbow("Feather")
 	segments := []string{
 		wordmark + " " + nameStyle.Render(a.config.Name),
+	}
+
+	// Active environment chip — only shown when one is set so profiles
+	// without environments don't pay for the extra noise.
+	if a.config.ActiveEnvironment != "" {
+		envStyle := lipgloss.NewStyle().
+			Foreground(shared.ColorSuccess).
+			Bold(true)
+		segments = append(segments, envStyle.Render("env: "+a.config.ActiveEnvironment))
 	}
 
 	url := a.appCtx.BaseURL

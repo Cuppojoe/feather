@@ -33,8 +33,7 @@ type MainViewport struct {
 	currentEndpoint *openapi.Endpoint
 
 	// Context reference for auto-fill
-	contextPanel *ContextPanel
-	context      *models.Context
+	context *models.Context
 
 	focused bool
 	keyMap  shared.KeyMap
@@ -77,15 +76,14 @@ type MainViewportResult struct {
 }
 
 // NewMainViewport creates a new main viewport
-func NewMainViewport(spec *openapi.ParsedSpec, ctx *models.Context, contextPanel *ContextPanel, keys shared.KeyMap, ov *overlay.Overlay) *MainViewport {
+func NewMainViewport(spec *openapi.ParsedSpec, ctx *models.Context, keys shared.KeyMap, ov *overlay.Overlay) *MainViewport {
 	return &MainViewport{
-		view:         ViewTagList,
-		tagList:      screens.NewMainMenu(spec.Tags, keys, ov),
-		context:      ctx,
-		contextPanel: contextPanel,
-		keyMap:       keys,
-		spec:         spec,
-		overlay:      ov,
+		view:    ViewTagList,
+		tagList: screens.NewMainMenu(spec.Tags, keys, ov),
+		context: ctx,
+		keyMap:  keys,
+		spec:    spec,
+		overlay: ov,
 	}
 }
 
@@ -176,6 +174,16 @@ func (m *MainViewport) IsCapturingInput() bool {
 func (m *MainViewport) RequestComplete() {
 	if m.requestBuilder != nil {
 		m.requestBuilder.SetExecuting(false)
+	}
+}
+
+// RefreshContext tells whichever inner screen is showing to re-pull
+// values from the live context. Called by the host after an environment
+// switch / edit so an already-open request reflects the new variables
+// without forcing the user to exit and re-enter the request.
+func (m *MainViewport) RefreshContext() {
+	if m.requestBuilder != nil {
+		m.requestBuilder.RefreshFromContext()
 	}
 }
 
@@ -295,13 +303,11 @@ func (m *MainViewport) Update(msg tea.Msg) MainViewportResult {
 		}
 		if result.Selected != nil {
 			m.currentEndpoint = result.Selected
-			// Create request builder with context panel for auto-fill, the
-			// spec's schemas (for example generation) and any overlay override
+			// Create request builder with the live context, the spec's
+			// schemas (for example generation) and any overlay override
 			// for this operation (saved body/params/headers).
 			ovr := m.overlay.EffectiveOverride(result.Selected.Method, result.Selected.Path)
 			m.requestBuilder = screens.NewRequestBuilder(result.Selected, m.context, m.keyMap, m.spec.Schemas, ovr, m.overlay)
-			// Auto-fill from context panel
-			m.autoFillRequestBuilder()
 			m.view = ViewRequestBuilder
 		}
 		return MainViewportResult{Cmd: result.Cmd}
@@ -328,25 +334,6 @@ func (m *MainViewport) Update(msg tea.Msg) MainViewportResult {
 	}
 
 	return MainViewportResult{Cmd: cmd}
-}
-
-// autoFillRequestBuilder populates the request builder with context values
-func (m *MainViewport) autoFillRequestBuilder() {
-	if m.requestBuilder == nil || m.contextPanel == nil {
-		return
-	}
-
-	// The request builder already reads from context in NewRequestBuilder,
-	// but we can ensure it has the latest values from the context panel
-	if m.currentEndpoint != nil {
-		for _, param := range m.currentEndpoint.Parameters {
-			if param.In == "path" {
-				if value := m.contextPanel.Get(param.Name); value != "" {
-					m.context.Set(param.Name, value)
-				}
-			}
-		}
-	}
 }
 
 // View renders the main viewport

@@ -31,10 +31,6 @@ func main() {
 		os.Exit(0)
 	}
 
-	if err := config.MigrateLegacyConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: legacy config migration failed: %v\n", err)
-	}
-
 	spec := *specPath
 	if spec == "" && flag.NArg() > 0 {
 		spec = flag.Arg(0)

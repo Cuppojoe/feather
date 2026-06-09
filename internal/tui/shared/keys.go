@@ -12,10 +12,10 @@ type KeyMap struct {
 	Back     key.Binding
 	Quit     key.Binding
 	Help     key.Binding
-	Context  key.Binding
 	History  key.Binding
 	Profile  key.Binding
 	Scripts  key.Binding
+	EnvList  key.Binding
 	Search   key.Binding
 	Copy     key.Binding
 	Save     key.Binding
@@ -63,10 +63,6 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys("f1", "?"),
 			key.WithHelp("f1", "help"),
 		),
-		Context: key.NewBinding(
-			key.WithKeys("c"),
-			key.WithHelp("c", "context"),
-		),
 		History: key.NewBinding(
 			key.WithKeys("h"),
 			key.WithHelp("h", "history"),
@@ -78,6 +74,10 @@ func DefaultKeyMap() KeyMap {
 		Scripts: key.NewBinding(
 			key.WithKeys("J"),
 			key.WithHelp("J", "scripts"),
+		),
+		EnvList: key.NewBinding(
+			key.WithKeys("E"),
+			key.WithHelp("E", "envs"),
 		),
 		Search: key.NewBinding(
 			key.WithKeys("/"),
@@ -124,7 +124,7 @@ func DefaultKeyMap() KeyMap {
 
 // ShortHelp returns a short help text
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Context, k.Profile, k.History, k.Scripts, k.Help, k.Quit}
+	return []key.Binding{k.Profile, k.EnvList, k.History, k.Scripts, k.Help, k.Quit}
 }
 
 // FullHelp returns the full help text
@@ -132,7 +132,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
 		{k.Up, k.Down, k.Left, k.Right},
 		{k.Enter, k.Back, k.Search},
-		{k.Context, k.Profile, k.History},
+		{k.Profile, k.EnvList, k.History},
 		{k.Scripts, k.Help, k.Copy, k.Save, k.Quit},
 	}
 }
