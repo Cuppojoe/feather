@@ -1,7 +1,7 @@
 // Package scripting runs user-authored JavaScript hooks around HTTP
 // requests. Each script execution gets a fresh sobek runtime (cheap, fully
 // isolated), a hard wall-clock timeout, and a `feather` global that exposes
-// the request, response, context, console, and a tiny synchronous HTTP
+// the request, response, environment, console, and a tiny synchronous HTTP
 // wrapper. The console is also available as the standard top-level `console`
 // global (console.log/warn/error), whose output flows to the Console tab in
 // the request details panel. Scripts never escape this sandbox.

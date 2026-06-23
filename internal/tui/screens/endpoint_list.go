@@ -91,12 +91,12 @@ func NewEndpointList(tag *openapi.TagGroup, keys shared.KeyMap, ov *overlay.Over
 
 	preEditor := shared.NewTextEditor(40, 10)
 	preEditor.SetLanguage("javascript")
-	preEditor.SetPlaceholder("// JS pre-request hook — runs for every request in this category")
+	preEditor.SetPlaceholder("// JS pre-request hook, runs for every request in this category")
 	preEditor.SetExternalEditorID(editorCallerTagScriptPre)
 	preEditor.SetExternalEditorExt(".js")
 	postEditor := shared.NewTextEditor(40, 10)
 	postEditor.SetLanguage("javascript")
-	postEditor.SetPlaceholder("// JS post-request hook — runs after every request in this category")
+	postEditor.SetPlaceholder("// JS post-request hook, runs after every request in this category")
 	postEditor.SetExternalEditorID(editorCallerTagScriptPost)
 	postEditor.SetExternalEditorExt(".js")
 	if ov != nil {

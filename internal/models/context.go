@@ -6,7 +6,7 @@ import (
 
 // Context holds the current state for path substitution and user-managed
 // session variables. Scripts read and write the same Values map via
-// feather.context.{get,set,delete}, so anything the user stores (tokens,
+// feather.environment.{get,set,delete}, so anything the user stores (tokens,
 // session IDs, anything else) lives here.
 type Context struct {
 	Values  map[string]string // User-defined values: org=epoch, gvc=demo

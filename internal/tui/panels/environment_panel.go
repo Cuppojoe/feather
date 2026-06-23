@@ -538,7 +538,7 @@ func (p *EnvironmentPanel) renderList(contentWidth int) string {
 	b.WriteString("\n\n")
 
 	if len(p.envs) == 0 {
-		b.WriteString(shared.DimStyle.Render("  No environments yet — press [n] to create one"))
+		b.WriteString(shared.DimStyle.Render("  No environments yet. Press [n] to create one."))
 		b.WriteString("\n")
 	} else {
 		for i, env := range p.envs {
@@ -594,7 +594,7 @@ func (p *EnvironmentPanel) renderRow(idx int, env *config.Environment, contentWi
 
 func (p *EnvironmentPanel) renderEdit(contentWidth, modalHeight int) string {
 	var b strings.Builder
-	title := shared.TitleStyle.Render(fmt.Sprintf("Environment — %s", p.editName))
+	title := shared.TitleStyle.Render(fmt.Sprintf("Environment: %s", p.editName))
 	close := shared.DimStyle.Render("[esc] back")
 	gap := max(0, contentWidth-lipgloss.Width(title)-lipgloss.Width(close))
 	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, title,

@@ -10,6 +10,7 @@ import (
 type RequestBuilder struct {
 	endpoint *openapi.Endpoint
 	values   map[string]string // Path and query parameter values
+	extras   map[string]string // Ad-hoc query params not declared on the endpoint
 	body     []byte
 	headers  map[string]string
 }
@@ -34,6 +35,16 @@ func (rb *RequestBuilder) SetValues(values map[string]string) *RequestBuilder {
 	for k, v := range values {
 		rb.values[k] = v
 	}
+	return rb
+}
+
+// SetExtraQueryParams supplies ad-hoc query parameters that aren't declared
+// on the endpoint's OpenAPI definition. They are appended to the final URL
+// alongside spec-defined params; if a key collides with a spec-defined
+// query param, the spec value wins so user-typed overrides on the Params
+// tab don't get silently shadowed by an ad-hoc row of the same name.
+func (rb *RequestBuilder) SetExtraQueryParams(extras map[string]string) *RequestBuilder {
+	rb.extras = extras
 	return rb
 }
 
@@ -72,6 +83,18 @@ func (rb *RequestBuilder) Build() (*Request, []string) {
 				queryParams[param.Name] = val
 			}
 		}
+	}
+	// Ad-hoc params are appended last so users can drop arbitrary keys via
+	// the Params tab without rewiring the spec. Spec-defined params take
+	// precedence on a name collision (already-filled key is left alone).
+	for k, v := range rb.extras {
+		if v == "" {
+			continue
+		}
+		if _, ok := queryParams[k]; ok {
+			continue
+		}
+		queryParams[k] = v
 	}
 
 	return &Request{

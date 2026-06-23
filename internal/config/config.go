@@ -16,8 +16,8 @@ import (
 // which one is active so switching profiles also restores their last
 // chosen variable bundle.
 //
-// Auth is intentionally absent — users assemble their own auth flow with
-// pre-request scripts in the Scripts modal (feather.context for storage,
+// Auth is intentionally absent; users assemble their own auth flow with
+// pre-request scripts in the Scripts modal (feather.environment for storage,
 // feather.fetch for token endpoints, feather.request.headers to inject).
 type Profile struct {
 	Name              string `yaml:"name"`

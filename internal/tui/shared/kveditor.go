@@ -146,6 +146,21 @@ func (e *KVEditor) SensitiveKeys() []string {
 	return out
 }
 
+// SetRowValue updates a single row's value in place, matched by key.
+// Returns true when a row with that key was found. Doesn't disturb
+// sort order, cursor, or dirty state — intended for live refreshes
+// from external state (e.g., environment-variable updates), not user
+// edits. No-op when the key isn't present.
+func (e *KVEditor) SetRowValue(key, value string) bool {
+	for i := range e.pairs {
+		if e.pairs[i].Key == key {
+			e.pairs[i].Value = value
+			return true
+		}
+	}
+	return false
+}
+
 // Values returns a fresh map of the current rows. Rows with an empty key
 // are skipped (a leftover from "a" that the user didn't finish naming).
 func (e *KVEditor) Values() map[string]string {
@@ -442,7 +457,7 @@ func (e *KVEditor) View() string {
 	b.WriteString("\n")
 
 	if len(e.pairs) == 0 {
-		b.WriteString(DimStyle.Render("  (no values — press [a] to add one)"))
+		b.WriteString(DimStyle.Render("  (no values yet)"))
 		return b.String()
 	}
 

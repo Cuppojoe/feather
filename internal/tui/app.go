@@ -88,12 +88,16 @@ func NewApp(base *openapi.ParsedSpec, cfg *config.Config, ov *overlay.Overlay) *
 		}
 	}
 	var ctxErr error
+	var ctxErrFull string
 	if resolved, err := models.Resolve(raw); err == nil {
 		for k, v := range resolved {
 			ctx.Set(k, v)
 		}
 	} else {
 		ctxErr = err
+		// Stash the full text too so the error-details modal (D) has
+		// something to show — it only opens when errFull is set.
+		ctxErrFull = err.Error()
 		for k, v := range raw {
 			ctx.Set(k, v)
 		}
@@ -132,6 +136,7 @@ func NewApp(base *openapi.ParsedSpec, cfg *config.Config, ov *overlay.Overlay) *
 
 	app := &App{
 		err:          ctxErr,
+		errFull:      ctxErrFull,
 		mainViewport: mainViewport,
 		requestPanel: requestPanel,
 		historyPanel: historyPanel,
@@ -304,12 +309,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.envPanel.Open(a.config.ActiveEnvironment)
 			return a, nil
 
-		case msg.String() == "e" && a.err != nil && a.errFull != "":
+		case key.Matches(msg, a.keys.ErrorDetails) && a.err != nil && a.errFull != "":
 			// Show error details modal
 			a.showErrorModal = true
 			return a, nil
 
-		case msg.String() == "h":
+		case key.Matches(msg, a.keys.History):
 			// Toggle history panel
 			if a.historyPanel.IsVisible() {
 				a.historyPanel.Close()
@@ -323,7 +328,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.calculateSizes()
 			return a, nil
 
-		case msg.String() == "r":
+		case key.Matches(msg, a.keys.RequestPanel):
 			// Toggle request panel
 			if a.requestPanel.IsVisible() {
 				a.requestPanel.Close()
@@ -337,7 +342,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.calculateSizes()
 			return a, nil
 
-		case msg.String() == "x" && (a.requestPanel.IsVisible() || a.historyPanel.IsVisible()):
+		case key.Matches(msg, a.keys.CloseSidePanels) && (a.requestPanel.IsVisible() || a.historyPanel.IsVisible()):
 			// Close both panels
 			a.requestPanel.Close()
 			a.historyPanel.Close()
@@ -511,6 +516,7 @@ func (a *App) applyActiveEnvironment(name string) {
 	a.config.ActiveEnvironment = name
 	if err := a.config.SaveDefault(); err != nil {
 		a.err = fmt.Errorf("saving active environment: %w", err)
+		a.errFull = a.err.Error()
 	}
 
 	var raw map[string]string
@@ -518,6 +524,7 @@ func (a *App) applyActiveEnvironment(name string) {
 		env, err := config.LoadEnvironment(name)
 		if err != nil {
 			a.err = fmt.Errorf("loading environment %q: %w", name, err)
+			a.errFull = a.err.Error()
 			return
 		}
 		raw = env.PlainValues()
@@ -528,11 +535,17 @@ func (a *App) applyActiveEnvironment(name string) {
 		delete(a.appCtx.Values, k)
 	}
 	if resolved, err := models.Resolve(raw); err == nil {
+		// The new environment resolves cleanly — clear any stale resolve
+		// error (e.g. a cycle the user just fixed) so it stops lingering.
+		a.err = nil
+		a.errFull = ""
 		for k, v := range resolved {
 			a.appCtx.Set(k, v)
 		}
 	} else {
 		a.err = err
+		// errFull lets the error-details modal (D) open on the cycle report.
+		a.errFull = err.Error()
 		for k, v := range raw {
 			a.appCtx.Set(k, v)
 		}
@@ -831,7 +844,7 @@ func (a *App) duplicateRequest(ep *openapi.Endpoint) {
 		op.Headers = ovr.Headers
 	}
 	a.overlay.AppendAdded(op)
-	a.statusMsg = "Duplicated request — edit its path"
+	a.statusMsg = "Duplicated request; edit its path"
 	a.rebuild(op.Tag)
 	// Open the editor on the freshly added clone.
 	clone := endpointForEditor(op)
@@ -870,7 +883,7 @@ func (a *App) requestDeleteRequest(ep *openapi.Endpoint) {
 func (a *App) requestDeleteCategory(name string) {
 	for _, tg := range a.spec.Tags {
 		if tg.Name == name && len(tg.Endpoints) > 0 {
-			a.statusMsg = "Category not empty — move or delete its requests first"
+			a.statusMsg = "Category not empty; move or delete its requests first"
 			return
 		}
 	}
@@ -1305,10 +1318,12 @@ func (a *App) buildProfileBar() string {
 
 	sep := " " + sepStyle.Render("│") + " "
 
-	// Rainbow "Feather" sits immediately to the left of the active profile.
+	// Rainbow "Feather" sits immediately to the left of the active profile,
+	// which carries a "profile:" label so it reads the same way the
+	// environment chip does.
 	wordmark := shared.Rainbow("Feather")
 	segments := []string{
-		wordmark + " " + nameStyle.Render(a.config.Name),
+		wordmark + " " + nameStyle.Render("profile: "+a.config.Name),
 	}
 
 	// Active environment chip — only shown when one is set so profiles
@@ -1366,7 +1381,7 @@ func (a *App) buildStatusBar() string {
 		if len(errMsg) > maxLen {
 			errMsg = errMsg[:maxLen-3] + "..."
 		}
-		parts = append(parts, shared.ErrorStyle.Render("⚠ "+errMsg+" [e]"))
+		parts = append(parts, shared.ErrorStyle.Render("⚠ "+errMsg+" [D]"))
 	} else if a.statusMsg != "" {
 		msg := strings.ReplaceAll(a.statusMsg, "\n", " ")
 		parts = append(parts, shared.DimStyle.Render(msg))

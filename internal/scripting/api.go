@@ -19,7 +19,7 @@ func install(rt *sobek.Runtime, ctx context.Context, env *Env, res *Result) {
 	// State.
 	root.Set("request", buildRequest(rt, env))
 	root.Set("response", buildResponse(rt, env))
-	root.Set("context", buildContext(rt, env))
+	root.Set("environment", buildEnvironment(rt, env))
 
 	// console is available both as feather.console and as the standard
 	// top-level `console` global, so scripts can use the familiar
@@ -168,9 +168,9 @@ func syncResponseBack(rt *sobek.Runtime, env *Env) {
 	}
 }
 
-// --- context --------------------------------------------------------------
+// --- environment ----------------------------------------------------------
 
-func buildContext(rt *sobek.Runtime, env *Env) sobek.Value {
+func buildEnvironment(rt *sobek.Runtime, env *Env) sobek.Value {
 	obj := rt.NewObject()
 	obj.Set("get", func(call sobek.FunctionCall) sobek.Value {
 		if env.Context == nil || len(call.Arguments) == 0 {

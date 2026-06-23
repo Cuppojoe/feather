@@ -552,11 +552,23 @@ func (p *ProfilePanel) renderList(contentWidth int) string {
 		b.WriteString(shared.DimStyle.Render("No profiles configured."))
 		b.WriteString("\n")
 	} else {
+		// Lay the rows out as aligned columns: name, status markers, then the
+		// spec path. Sizing the name and marker columns to their widest entry
+		// keeps the spec paths lined up instead of floating after each name.
+		nameW, markerW := 0, 0
+		for _, prof := range p.profiles {
+			if w := lipgloss.Width(prof.Name); w > nameW {
+				nameW = w
+			}
+			if _, mw := p.markerString(prof); mw > markerW {
+				markerW = mw
+			}
+		}
 		// titleBar=Y0, divider=Y1, first profile row=Y2.
 		const firstRowY = 2
 		for i, prof := range p.profiles {
 			p.clickMap.AddRow(firstRowY+i, i)
-			b.WriteString(p.renderListRow(i, prof, contentWidth))
+			b.WriteString(p.renderListRow(i, prof, contentWidth, nameW, markerW))
 			b.WriteString("\n")
 		}
 	}
@@ -600,14 +612,10 @@ func (p *ProfilePanel) renderList(contentWidth int) string {
 	return b.String()
 }
 
-func (p *ProfilePanel) renderListRow(idx int, prof *config.Profile, contentWidth int) string {
-	cursor := "  "
-	nameStyle := shared.NormalStyle
-	if idx == p.cursor {
-		cursor = shared.CursorStyle.Render("> ")
-		nameStyle = shared.SelectedStyle
-	}
-
+// markerString returns the status markers for a profile (● active, ★ default)
+// as a styled string plus its display width, so callers can both render it and
+// size the marker column to the widest entry.
+func (p *ProfilePanel) markerString(prof *config.Profile) (string, int) {
 	markers := []string{}
 	if prof.Name == p.activeName {
 		markers = append(markers, shared.SuccessStyle.Render("●"))
@@ -615,19 +623,54 @@ func (p *ProfilePanel) renderListRow(idx int, prof *config.Profile, contentWidth
 	if prof.Name == p.defaultName {
 		markers = append(markers, shared.WarningStyle.Render("★"))
 	}
-	markerStr := ""
-	if len(markers) > 0 {
-		markerStr = " " + strings.Join(markers, " ")
+	if len(markers) == 0 {
+		return "", 0
+	}
+	s := strings.Join(markers, " ")
+	return s, lipgloss.Width(s)
+}
+
+func (p *ProfilePanel) renderListRow(idx int, prof *config.Profile, contentWidth, nameW, markerW int) string {
+	const cursorW = 2 // "> " / "  "
+	const gapW = 2    // gap between the marker column and the spec path
+
+	cursor := "  "
+	nameStyle := shared.NormalStyle
+	if idx == p.cursor {
+		cursor = shared.CursorStyle.Render("> ")
+		nameStyle = shared.SelectedStyle
 	}
 
-	name := nameStyle.Render(prof.Name) + markerStr
-	nameWidth := lipgloss.Width(cursor) + lipgloss.Width(name)
-	specRoom := contentWidth - nameWidth - 2
-	specPart := ""
-	if prof.SpecPath != "" && specRoom > 4 {
-		specPart = "  " + shared.DimStyle.Render(shared.TruncateWithEllipsis(prof.SpecPath, specRoom))
+	var b strings.Builder
+	b.WriteString(cursor)
+
+	// Name column, padded to the widest name so markers and spec align.
+	b.WriteString(nameStyle.Render(prof.Name))
+	if pad := nameW - lipgloss.Width(prof.Name); pad > 0 {
+		b.WriteString(strings.Repeat(" ", pad))
 	}
-	return cursor + name + specPart
+
+	used := cursorW + nameW
+
+	// Marker column — only present when some profile has markers.
+	if markerW > 0 {
+		markers, mw := p.markerString(prof)
+		b.WriteString(" ")
+		b.WriteString(markers)
+		if pad := markerW - mw; pad > 0 {
+			b.WriteString(strings.Repeat(" ", pad))
+		}
+		used += 1 + markerW
+	}
+
+	// Spec column, aligned and truncated so it stays on one row (wrapped rows
+	// break click hit-testing).
+	specRoom := contentWidth - used - gapW
+	if prof.SpecPath != "" && specRoom > 4 {
+		b.WriteString(strings.Repeat(" ", gapW))
+		b.WriteString(shared.DimStyle.Render(shared.TruncateWithEllipsis(prof.SpecPath, specRoom)))
+	}
+	return b.String()
 }
 
 func (p *ProfilePanel) renderDetails(contentWidth int) string {

@@ -176,9 +176,10 @@ func (r *HistoryPanel) renderHistoryView() string {
 		startIdx = r.historyCursor - listHeight + 1
 	}
 	r.listStartIdx = startIdx
-	// Panel layout: border-top (1) + title (1) + divider (1) + hidden table
-	// border-top (1) = first visible row at panel-Y 4.
-	r.listStartRow = 4
+	// Panel layout: border-top (1) + title (1) + divider (1) = first visible
+	// row at panel-Y 3. The table's hidden top border is disabled below so no
+	// blank line sits between the divider and the first history row.
+	r.listStartRow = 3
 
 	// Build table rows
 	var rows [][]string
@@ -213,6 +214,7 @@ func (r *HistoryPanel) renderHistoryView() string {
 	// Create table
 	t := table.New().
 		Border(lipgloss.HiddenBorder()).
+		BorderTop(false).
 		Rows(rows...).
 		Width(r.width - 8).
 		StyleFunc(func(row, col int) lipgloss.Style {

@@ -35,7 +35,7 @@ func Resolve(raw map[string]string) (map[string]string, error) {
 				if n == name {
 					path := append(append([]string{}, stack[i:]...), name)
 					return "", fmt.Errorf(
-						"cycle detected in context values: %s",
+						"cycle detected in environment values: %s",
 						strings.Join(path, " → "))
 				}
 			}

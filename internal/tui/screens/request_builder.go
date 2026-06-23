@@ -37,7 +37,9 @@ const (
 // Tab indices for request builder
 const (
 	TabExecute = iota
+	TabParams
 	TabBody
+	TabHeaders
 	TabScripts
 )
 
@@ -81,19 +83,34 @@ type RequestBuilder struct {
 	scriptPhase      int
 	scriptPreEditor  shared.TextEditor
 	scriptPostEditor shared.TextEditor
+
+	// Declarative request-level headers. The KVEditor holds the
+	// authoring view; values are stored verbatim (with ${env_var}
+	// references intact) and substituted against the live context at
+	// send time in buildRequest. Saved into r.override.Headers when the
+	// user presses ctrl+s on this tab.
+	headersEditor shared.KVEditor
+
+	// Query parameter editor. Seeded with spec-defined query params and
+	// their current values. Add/remove/edit go through here; ad-hoc rows
+	// (names not declared on the endpoint) ride through to send time via
+	// http.RequestBuilder.SetExtraQueryParams.
+	paramsEditor shared.KVEditor
 }
 
 // Click-target IDs. Negative IDs are tab targets, non-negative are field
 // row indices so we can store both in a single map without ambiguity.
 const (
 	clickIDTabExecute = -1
-	clickIDTabBody    = -2
-	clickIDTabScripts = -3
+	clickIDTabParams  = -2
+	clickIDTabBody    = -3
+	clickIDTabHeaders = -4
+	clickIDTabScripts = -5
 )
 
 // IsEditing returns true if the request builder is currently editing a field
-// — either a param value (textinput), the request body, or the active
-// script editor on the Scripts tab.
+// — either a param value (textinput), the request body, the active
+// script editor on the Scripts tab, or one of the KV editors' inline cells.
 func (r *RequestBuilder) IsEditing() bool {
 	if r.editing {
 		return true
@@ -102,6 +119,12 @@ func (r *RequestBuilder) IsEditing() bool {
 		return true
 	}
 	if r.activeTab == TabScripts && r.activeScriptEditor().Focused() {
+		return true
+	}
+	if r.activeTab == TabHeaders && r.headersEditor.IsEditing() {
+		return true
+	}
+	if r.activeTab == TabParams && r.paramsEditor.IsEditing() {
 		return true
 	}
 	return false
@@ -117,8 +140,14 @@ func (r *RequestBuilder) activeScriptEditor() *shared.TextEditor {
 	return &r.scriptPreEditor
 }
 
-// IsCapturingInput reports whether keyboard input should be routed straight
-// to the request builder, bypassing the app's global single-key bindings.
+// IsCapturingInput reports whether the user is actively typing text into
+// an inline editor and the app should NOT intercept single-letter global
+// shortcuts. True only when characters are being typed (param textinput,
+// body editor, scripts editor, or a KV editor's cell-edit textinput).
+// A "merely focused" KV editor in nav mode is not text capture — its
+// shortcuts are lowercase letters that don't collide with the global
+// uppercase set, so globals can fire normally without disrupting kv
+// navigation.
 func (r *RequestBuilder) IsCapturingInput() bool {
 	return r.IsEditing()
 }
@@ -222,17 +251,37 @@ func NewRequestBuilder(endpoint *openapi.Endpoint, ctx *models.Context, keys sha
 	// tag-scope scripts still live in the global Scripts modal (J).
 	preEditor := shared.NewTextEditor(40, 10)
 	preEditor.SetLanguage("javascript")
-	preEditor.SetPlaceholder("// JS pre-request hook — runs before this request fires")
+	preEditor.SetPlaceholder("// JS pre-request hook, runs before this request fires")
 	preEditor.SetExternalEditorID(editorCallerScriptPre)
 	preEditor.SetExternalEditorExt(".js")
 	postEditor := shared.NewTextEditor(40, 10)
 	postEditor.SetLanguage("javascript")
-	postEditor.SetPlaceholder("// JS post-request hook — runs after the response comes back")
+	postEditor.SetPlaceholder("// JS post-request hook, runs after the response comes back")
 	postEditor.SetExternalEditorID(editorCallerScriptPost)
 	postEditor.SetExternalEditorExt(".js")
 	if ovr != nil {
 		preEditor.SetValue(ovr.Scripts.Pre)
 		postEditor.SetValue(ovr.Scripts.Post)
+	}
+
+	// Headers editor — seeded from the saved override. Values keep their
+	// ${env_var} references verbatim; substitution happens at send time
+	// against the live context.
+	headersEditor := shared.NewKVEditor()
+	if ovr != nil && len(ovr.Headers) > 0 {
+		headersEditor.SetValues(ovr.Headers)
+	}
+
+	// Params editor — seeded with spec-defined query params and their
+	// current values. Ad-hoc rows (names not in queryParams) ride through
+	// as extras at send time.
+	paramsEditor := shared.NewKVEditor()
+	paramsSeed := make(map[string]string, len(queryParams))
+	for _, p := range queryParams {
+		paramsSeed[p.Name] = values[p.Name]
+	}
+	if len(paramsSeed) > 0 {
+		paramsEditor.SetValues(paramsSeed)
 	}
 
 	rb := &RequestBuilder{
@@ -246,6 +295,8 @@ func NewRequestBuilder(endpoint *openapi.Endpoint, ctx *models.Context, keys sha
 		bodyEditor:       bodyEditor,
 		scriptPreEditor:  preEditor,
 		scriptPostEditor: postEditor,
+		headersEditor:    headersEditor,
+		paramsEditor:     paramsEditor,
 		keys:             keys,
 		activeTab:        TabExecute,
 		spinner:          sp,
@@ -261,33 +312,70 @@ func NewRequestBuilder(endpoint *openapi.Endpoint, ctx *models.Context, keys sha
 
 // findInitialCursor finds the right initial cursor position
 // If all required path params are filled, focus on Execute button
-// Otherwise, focus on first unfilled required param
+// Otherwise, focus on first unfilled required path param.
 func (r *RequestBuilder) findInitialCursor() int {
-	// Check for first unfilled required path param
 	for i, p := range r.pathParams {
 		if p.Required && r.values[p.Name] == "" {
 			return i
 		}
 	}
-	// All path params filled, focus on execute button
-	return len(r.pathParams) + len(r.queryParams)
+	return len(r.pathParams) // execute button index
+}
+
+// initialCursorForTab picks the right starting cursor for a tab — Execute
+// jumps to the first unfilled required path param (or the execute button),
+// every other tab starts at row 0.
+func (r *RequestBuilder) initialCursorForTab(tab int) int {
+	if tab == TabExecute {
+		return r.findInitialCursor()
+	}
+	return 0
+}
+
+// setActiveTab handles a tab transition. It blurs whichever KV editor (if
+// any) was attached to the old tab and auto-focuses the new tab's editor,
+// so Headers / Params land the user "inside" the editor without a manual
+// Enter — saving a keystroke on the edit path and letting the next Esc
+// exit the screen directly instead of just defocusing.
+func (r *RequestBuilder) setActiveTab(tab int) {
+	if r.activeTab == tab {
+		return
+	}
+	switch r.activeTab {
+	case TabHeaders:
+		r.headersEditor.Blur()
+	case TabParams:
+		r.paramsEditor.Blur()
+	}
+	r.activeTab = tab
+	r.cursor = r.initialCursorForTab(tab)
+	switch tab {
+	case TabHeaders:
+		r.headersEditor.Focus()
+	case TabParams:
+		r.paramsEditor.Focus()
+	}
 }
 
 // executeRowIndex returns the index of the execute button row
 func (r *RequestBuilder) executeRowIndex() int {
-	return len(r.pathParams) + len(r.queryParams)
+	return len(r.pathParams)
 }
 
 // tabRowCount returns the number of rows in the current tab
 func (r *RequestBuilder) tabRowCount() int {
 	switch r.activeTab {
 	case TabExecute:
-		return len(r.pathParams) + len(r.queryParams) + 1 // +1 for execute button
+		return len(r.pathParams) + 1 // +1 for execute button
+	case TabParams:
+		return 1
 	case TabBody:
 		if r.endpoint.RequestBody != nil {
 			return 1
 		}
 		return 0
+	case TabHeaders:
+		return 1
 	case TabScripts:
 		return 1
 	}
@@ -349,7 +437,8 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 				return r.saveOverride()
 			case key.Matches(km, r.keys.Tab), key.Matches(km, r.keys.ShiftTab):
 				// fall through to the outer handler for tab nav
-			case km.String() == "1", km.String() == "2", km.String() == "3":
+			case km.String() == "1", km.String() == "2",
+				km.String() == "3", km.String() == "4", km.String() == "5":
 				// Tab-switch shortcuts ONLY when the editor isn't
 				// taking input — otherwise typing digits into a JSON
 				// body silently teleports the user to another tab.
@@ -390,6 +479,26 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 		}
 	}
 
+	// Headers tab: forward keystrokes to the KV editor. The editor is
+	// auto-focused on tab select. In nav mode the editor only claims
+	// lowercase letters and arrows; Esc, uppercase letters, and other
+	// non-typing keys cascade past us to the outer app-scope handlers
+	// (so Esc still pops back to the endpoint list, H still opens
+	// History, etc.). Once an inline cell edit is active the editor
+	// claims everything except ctrl+s.
+	if r.activeTab == TabHeaders && !r.editing {
+		if cmd, handled := r.routeKVTabKey(&r.headersEditor, msg); handled {
+			return RequestBuilderResult{Cmd: cmd}
+		}
+	}
+
+	// Params tab: same routing as Headers, against the params KV editor.
+	if r.activeTab == TabParams && !r.editing {
+		if cmd, handled := r.routeKVTabKey(&r.paramsEditor, msg); handled {
+			return RequestBuilderResult{Cmd: cmd}
+		}
+	}
+
 	// Scripts tab: same routing pattern as Body, against whichever phase
 	// editor (pre or post) is active. ctrl+p toggles phase; ctrl+s saves
 	// both buffers via saveOverride; ctrl+v hands the active buffer to
@@ -416,7 +525,8 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 				return r.saveOverride()
 			case key.Matches(km, r.keys.Tab), key.Matches(km, r.keys.ShiftTab):
 				// fall through to the outer handler for tab nav
-			case km.String() == "1", km.String() == "2", km.String() == "3":
+			case km.String() == "1", km.String() == "2",
+				km.String() == "3", km.String() == "4", km.String() == "5":
 				// Same guard as the Body tab — let the editor have the
 				// digit when it's collecting input, only treat it as a
 				// tab-switch shortcut when the editor is blurred.
@@ -451,25 +561,21 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 		}
 	}
 
-	// Handle value editing
+	// Handle value editing (path params only — query params live on the
+	// Params tab via the KV editor).
 	if r.editing {
 		switch msg := msg.(type) {
 		case tea.KeyMsg:
 			switch msg.String() {
 			case "enter":
-				// Save the value
 				paramIdx := r.cursor
 				if paramIdx < len(r.pathParams) {
 					paramName := r.pathParams[paramIdx].Name
 					r.values[paramName] = r.input.Value()
 					r.fromContext[paramName] = false // Mark as manually edited
-				} else if paramIdx < len(r.pathParams)+len(r.queryParams) {
-					qIdx := paramIdx - len(r.pathParams)
-					r.values[r.queryParams[qIdx].Name] = r.input.Value()
 				}
 				r.editing = false
 				r.input.Blur()
-				// Move to next unfilled param or execute button
 				r.cursor = r.findNextCursor(r.cursor + 1)
 				return RequestBuilderResult{Cmd: cmd}
 			case "esc":
@@ -501,14 +607,15 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 				if id, ok := r.clickMap.Hit(msg.X, msg.Y); ok {
 					switch id {
 					case clickIDTabExecute:
-						r.activeTab = TabExecute
-						r.cursor = r.findInitialCursor()
+						r.setActiveTab(TabExecute)
+					case clickIDTabParams:
+						r.setActiveTab(TabParams)
 					case clickIDTabBody:
-						r.activeTab = TabBody
-						r.cursor = 0
+						r.setActiveTab(TabBody)
+					case clickIDTabHeaders:
+						r.setActiveTab(TabHeaders)
 					case clickIDTabScripts:
-						r.activeTab = TabScripts
-						r.cursor = 0
+						r.setActiveTab(TabScripts)
 					default:
 						if id >= 0 {
 							r.cursor = id
@@ -524,23 +631,22 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 		switch {
 		case key.Matches(msg, r.keys.Left):
 			if r.activeTab > 0 {
-				r.activeTab--
-				r.cursor = 0
+				r.setActiveTab(r.activeTab - 1)
 			}
 		case key.Matches(msg, r.keys.Right):
 			if r.activeTab < TabScripts {
-				r.activeTab++
-				r.cursor = 0
+				r.setActiveTab(r.activeTab + 1)
 			}
 		case msg.String() == "1":
-			r.activeTab = TabExecute
-			r.cursor = r.findInitialCursor()
+			r.setActiveTab(TabExecute)
 		case msg.String() == "2":
-			r.activeTab = TabBody
-			r.cursor = 0
+			r.setActiveTab(TabParams)
 		case msg.String() == "3":
-			r.activeTab = TabScripts
-			r.cursor = 0
+			r.setActiveTab(TabBody)
+		case msg.String() == "4":
+			r.setActiveTab(TabHeaders)
+		case msg.String() == "5":
+			r.setActiveTab(TabScripts)
 		case key.Matches(msg, r.keys.Up):
 			if r.cursor > 0 {
 				r.cursor--
@@ -563,23 +669,74 @@ func (r *RequestBuilder) Update(msg tea.Msg) RequestBuilderResult {
 	return RequestBuilderResult{Cmd: cmd}
 }
 
-// findNextCursor finds the next sensible cursor position
+// findNextCursor finds the next sensible cursor position. Walks forward
+// looking for the next unfilled required path param, otherwise lands on
+// the execute button.
 func (r *RequestBuilder) findNextCursor(startFrom int) int {
-	totalParams := len(r.pathParams) + len(r.queryParams)
-
-	// Look for next unfilled required param
 	for i := startFrom; i < len(r.pathParams); i++ {
 		if r.pathParams[i].Required && r.values[r.pathParams[i].Name] == "" {
 			return i
 		}
 	}
+	if startFrom <= len(r.pathParams) {
+		return len(r.pathParams)
+	}
+	return startFrom
+}
 
-	// If all required params filled, go to execute button
-	if startFrom <= totalParams {
-		return totalParams
+// routeKVTabKey is the shared key/mouse dispatch for the two KVEditor-backed
+// tabs (Headers and Params). The returned bool tells the caller whether the
+// message was fully handled — when false the caller should fall through to
+// the outer tab-nav switch so Left/Right/Tab/digit keys can change tabs
+// even from inside the editor.
+func (r *RequestBuilder) routeKVTabKey(ed *shared.KVEditor, msg tea.Msg) (tea.Cmd, bool) {
+	if mm, ok := msg.(tea.MouseMsg); ok {
+		switch mm.Button {
+		case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+			return ed.Update(msg), true
+		case tea.MouseButtonLeft:
+			cmd := ed.Update(msg)
+			// Forward press/drag to the editor; let release fall through
+			// to the outer click map so tab-bar clicks still switch tabs.
+			if mm.Action != tea.MouseActionRelease {
+				return cmd, true
+			}
+			return cmd, false
+		}
+		return nil, false
+	}
+	km, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return nil, false
 	}
 
-	return startFrom
+	// Inline cell edit: editor owns nearly everything; reserve ctrl+s so
+	// users can still save mid-edit without explicitly committing first.
+	if ed.IsEditing() {
+		if key.Matches(km, r.keys.Save) {
+			return nil, false
+		}
+		return ed.Update(km), true
+	}
+
+	if !ed.Focused() {
+		// Cursor is on the tab bar but the editor hasn't been entered yet.
+		// Let everything fall through to the outer nav — including ctrl+s
+		// which is wired up in the outer switch.
+		return nil, false
+	}
+
+	// Focused, not mid-cell-edit. Forward only the keys the editor itself
+	// claims in nav mode (its lowercase letter shortcuts + arrows /
+	// home / end / enter). Everything else — Esc, uppercase global
+	// letters, ctrl-modified, digit tab shortcuts, ctrl+s — cascades up
+	// to the outer scope. setActiveTab handles blur/focus on tab change.
+	switch km.String() {
+	case "up", "k", "down", "j", "home", "g", "end", "G",
+		"a", "enter", "e", "r", "c", "s", "v", "d":
+		return ed.Update(km), true
+	}
+	return nil, false
 }
 
 // handleEnter handles the enter key based on current tab and cursor
@@ -592,21 +749,32 @@ func (r *RequestBuilder) handleEnter() RequestBuilderResult {
 			r.input.SetValue(r.values[r.pathParams[r.cursor].Name])
 			r.input.Focus()
 			return RequestBuilderResult{Cmd: textinput.Blink}
-		} else if r.cursor < len(r.pathParams)+len(r.queryParams) {
-			// Edit query param
-			qIdx := r.cursor - len(r.pathParams)
-			r.editing = true
-			r.input.SetValue(r.values[r.queryParams[qIdx].Name])
-			r.input.Focus()
-			return RequestBuilderResult{Cmd: textinput.Blink}
-		} else {
-			// Execute button
-			return r.executeRequest()
 		}
+		// Execute button
+		return r.executeRequest()
+	case TabParams:
+		// Same pattern as Headers — first Enter focuses the editor, then
+		// subsequent Enters begin an inline cell edit.
+		if !r.paramsEditor.Focused() {
+			return RequestBuilderResult{Cmd: r.paramsEditor.Focus()}
+		}
+		cmd := r.paramsEditor.Update(shared.KeyMsgFromName("enter"))
+		return RequestBuilderResult{Cmd: cmd}
 	case TabBody:
 		if r.endpoint.RequestBody != nil && !r.bodyEditor.Focused() {
 			return RequestBuilderResult{Cmd: r.bodyEditor.Focus()}
 		}
+	case TabHeaders:
+		// Enter forwards to the KV editor — when its outer cursor is on
+		// a row this starts editing the value; when not focused yet it
+		// makes the editor live.
+		if !r.headersEditor.Focused() {
+			return RequestBuilderResult{Cmd: r.headersEditor.Focus()}
+		}
+		// Already focused: let the kv editor handle Enter natively
+		// (begin editing the highlighted row's value).
+		cmd := r.headersEditor.Update(shared.KeyMsgFromName("enter"))
+		return RequestBuilderResult{Cmd: cmd}
 	case TabScripts:
 		ed := r.activeScriptEditor()
 		if !ed.Focused() {
@@ -661,6 +829,9 @@ func (r *RequestBuilder) SetExecuting(executing bool) {
 //   - Params that currently have NO value but the new context supplies
 //     one get filled and marked as context-sourced, so newly added env
 //     vars populate empty fields without any prompting.
+//   - The Params-tab kv editor mirrors any update for spec-defined query
+//     params via SetRowValue so the user sees the new value without
+//     losing cursor position or ad-hoc rows.
 func (r *RequestBuilder) RefreshFromContext() {
 	refresh := func(name string) {
 		if r.fromContext[name] {
@@ -679,13 +850,26 @@ func (r *RequestBuilder) RefreshFromContext() {
 	}
 	for _, p := range r.queryParams {
 		refresh(p.Name)
+		r.paramsEditor.SetRowValue(p.Name, r.values[p.Name])
 	}
 }
 
 // buildRequest builds the HTTP request
 func (r *RequestBuilder) buildRequest() *http.Request {
+	// Sync the latest Params-tab edits into r.values + the ad-hoc map so
+	// what the user typed in the kv editor is what we send, even without
+	// an explicit ctrl+s.
+	r.syncParamsFromEditor()
+
 	builder := http.NewRequestBuilder(r.endpoint)
-	builder.SetValues(r.values)
+	// Expand any ${env_var} references in path + query param values
+	// against the live context so users can write things like
+	// `api_key=${apiKey}` on the Params tab and have it resolve at send
+	// time, matching the Headers tab's authoring model.
+	builder.SetValues(r.substituteValues(r.values))
+	if extras := r.adhocQueryParams(); len(extras) > 0 {
+		builder.SetExtraQueryParams(r.substituteValues(extras))
+	}
 
 	if r.endpoint.RequestBody != nil {
 		body := r.bodyEditor.Value()
@@ -697,7 +881,7 @@ func (r *RequestBuilder) buildRequest() *http.Request {
 	// Apply any overlay headers saved for this operation. Header values
 	// may reference context entries via ${name} — substitute against the
 	// current context so e.g. `Authorization: Bearer ${token}` lines up
-	// with whatever feather.context.set("token", ...) most recently left.
+	// with whatever feather.environment.set("token", ...) most recently left.
 	if r.override != nil {
 		for k, v := range r.override.Headers {
 			builder.SetHeader(k, models.Substitute(v, r.context.Values))
@@ -708,11 +892,74 @@ func (r *RequestBuilder) buildRequest() *http.Request {
 	return req
 }
 
+// substituteValues returns a copy of m with every value passed through
+// models.Substitute against the live context. Used to expand ${env_var}
+// references in path / query parameter values right before they're sent.
+func (r *RequestBuilder) substituteValues(m map[string]string) map[string]string {
+	if len(m) == 0 {
+		return m
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = models.Substitute(v, r.context.Values)
+	}
+	return out
+}
+
+// syncParamsFromEditor pushes Params-tab kv rows back into r.values for
+// any spec-defined query params. Ad-hoc rows aren't merged into r.values
+// (which is name-indexed for spec params) — they're picked up separately
+// by adhocQueryParams.
+func (r *RequestBuilder) syncParamsFromEditor() {
+	spec := r.specQueryParamNames()
+	for k, v := range r.paramsEditor.Values() {
+		if spec[k] {
+			r.values[k] = v
+			// Manual edit on the Params tab overrides any context-sourced
+			// flag so a later RefreshFromContext doesn't clobber it.
+			if v != "" {
+				r.fromContext[k] = false
+			}
+		}
+	}
+}
+
+// adhocQueryParams returns the kv rows whose keys aren't spec-defined
+// query params. These get sent via http.RequestBuilder.SetExtraQueryParams.
+func (r *RequestBuilder) adhocQueryParams() map[string]string {
+	spec := r.specQueryParamNames()
+	var out map[string]string
+	for k, v := range r.paramsEditor.Values() {
+		if spec[k] || v == "" {
+			continue
+		}
+		if out == nil {
+			out = map[string]string{}
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// specQueryParamNames is the set of query parameter names declared on the
+// endpoint — used to split Params-tab rows into "spec" vs. "ad-hoc".
+func (r *RequestBuilder) specQueryParamNames() map[string]bool {
+	out := make(map[string]bool, len(r.queryParams))
+	for _, p := range r.queryParams {
+		out[p.Name] = true
+	}
+	return out
+}
+
 // saveOverride captures the current body, parameter values, and inline
 // pre/post scripts as an overlay override for this operation, preserving
 // summary/description/headers/tag from the existing override, and returns
 // a result the app persists.
 func (r *RequestBuilder) saveOverride() RequestBuilderResult {
+	// Sync the Params tab into r.values first so the persisted defaults
+	// match whatever the user just typed there.
+	r.syncParamsFromEditor()
+
 	ovr := overlay.OpOverride{
 		BodyExample: r.bodyEditor.Value(),
 		Scripts: overlay.Scripts{
@@ -724,7 +971,12 @@ func (r *RequestBuilder) saveOverride() RequestBuilderResult {
 		ovr.Summary = r.override.Summary
 		ovr.Description = r.override.Description
 		ovr.Tag = r.override.Tag
-		ovr.Headers = r.override.Headers
+	}
+	// Declarative headers come from the Headers tab editor. Stored
+	// verbatim so ${env_var} refs survive the round-trip; substitution
+	// runs at send time in buildRequest.
+	if headers := r.headersEditor.Values(); len(headers) > 0 {
+		ovr.Headers = headers
 	}
 	// Persist every non-empty parameter value the user has set.
 	for name, v := range r.values {
@@ -789,10 +1041,12 @@ func (r *RequestBuilder) View(width, height int) string {
 		b.WriteString("\n")
 	}
 
-	// Resolved URL preview
+	// Resolved URL preview. Path placeholders are filled from r.values
+	// with ${env_var} references expanded, so what the user sees here
+	// matches what would actually be sent.
 	resolvedPath, _ := r.context.SubstitutePath(r.endpoint.Path)
 	for k, v := range r.values {
-		resolvedPath = strings.ReplaceAll(resolvedPath, "{"+k+"}", v)
+		resolvedPath = strings.ReplaceAll(resolvedPath, "{"+k+"}", models.Substitute(v, r.context.Values))
 	}
 	urlPreview := r.context.BaseURL + resolvedPath
 	b.WriteString(shared.DimStyle.Render("URL: "))
@@ -800,7 +1054,7 @@ func (r *RequestBuilder) View(width, height int) string {
 	b.WriteString("\n\n")
 
 	// Tab bar
-	tabs := []string{"1:Execute", "2:Body", "3:Scripts"}
+	tabs := []string{"1:Execute", "2:Params", "3:Body", "4:Headers", "5:Scripts"}
 	var tabViews []string
 	for i, tab := range tabs {
 		if i == r.activeTab {
@@ -812,7 +1066,7 @@ func (r *RequestBuilder) View(width, height int) string {
 	tabBar := lipgloss.JoinHorizontal(lipgloss.Bottom, tabViews...)
 	// Record exactly where the tab bar lands and how wide each tab is.
 	tabRowY := strings.Count(b.String(), "\n")
-	tabIDs := []int{clickIDTabExecute, clickIDTabBody, clickIDTabScripts}
+	tabIDs := []int{clickIDTabExecute, clickIDTabParams, clickIDTabBody, clickIDTabHeaders, clickIDTabScripts}
 	xCursor := 0
 	for i, tv := range tabViews {
 		w := lipgloss.Width(tv)
@@ -831,8 +1085,12 @@ func (r *RequestBuilder) View(width, height int) string {
 	switch r.activeTab {
 	case TabExecute:
 		b.WriteString(r.renderExecuteTab(contentStartRow))
+	case TabParams:
+		b.WriteString(r.renderParamsTab(contentStartRow))
 	case TabBody:
 		b.WriteString(r.renderBodyTab(contentStartRow))
+	case TabHeaders:
+		b.WriteString(r.renderHeadersTab(contentStartRow))
 	case TabScripts:
 		b.WriteString(r.renderScriptsTab(contentStartRow))
 	}
@@ -862,18 +1120,13 @@ func (r *RequestBuilder) renderExecuteTab(startScreenRow int) string {
 		b.WriteString("\n")
 	}
 
-	// Query parameters section
+	// Hint pointing users at the Params tab — only shown when the endpoint
+	// has query parameters, so a path-only request doesn't get distracting
+	// "go look elsewhere" text.
 	if len(r.queryParams) > 0 {
-		b.WriteString(shared.DimStyle.Render("QUERY PARAMETERS"))
-		b.WriteString("\n")
-
-		for _, p := range r.queryParams {
-			r.clickMap.AddRow(startScreenRow+strings.Count(b.String(), "\n"), row)
-			b.WriteString(r.renderParamRow(p, row, false))
-			b.WriteString("\n")
-			row++
-		}
-		b.WriteString("\n")
+		b.WriteString(shared.DimStyle.Render(
+			fmt.Sprintf("QUERY PARAMETERS  (%d declared; edit on the Params tab)", len(r.queryParams))))
+		b.WriteString("\n\n")
 	}
 
 	// Execute button
@@ -1024,7 +1277,7 @@ func (r *RequestBuilder) renderScriptsTab(startScreenRow int) string {
 	if r.hasOtherScopeScripts() {
 		b.WriteString("  ")
 		b.WriteString(shared.DimStyle.Render(
-			"profile/tag scripts also run — press [J] for the full editor"))
+			"profile/tag scripts also run; press [J] for the full editor"))
 	}
 	b.WriteString("\n")
 	b.WriteString(shared.DimStyle.Render(strings.Repeat("─", r.width-2)))
@@ -1071,6 +1324,47 @@ func (r *RequestBuilder) hasOtherScopeScripts() bool {
 		}
 	}
 	return false
+}
+
+// renderParamsTab hosts the query-parameter editor. Spec-defined params
+// from the endpoint are pre-populated as rows so users can fill values
+// without losing track of what the endpoint expects; new rows can be
+// added for ad-hoc params, which ride through to the final URL via
+// http.RequestBuilder.SetExtraQueryParams at send time.
+func (r *RequestBuilder) renderParamsTab(startScreenRow int) string {
+	var b strings.Builder
+
+	used := strings.Count(b.String(), "\n")
+	editorHeight := r.height - (startScreenRow + used) - 2
+	if editorHeight < 4 {
+		editorHeight = 4
+	}
+	r.paramsEditor.SetSize(r.width-2, editorHeight)
+	b.WriteString(r.paramsEditor.View())
+	b.WriteString("\n")
+	b.WriteString(shared.DimStyle.Render("[ctrl+s] save  "))
+	b.WriteString(r.paramsEditor.Hint())
+	return b.String()
+}
+
+// renderHeadersTab hosts the declarative request-level header editor.
+// Values are stored verbatim with any ${env_var} references intact and
+// resolved against the live context at send time, so a single Authorization
+// row like `Bearer ${apiToken}` adapts to whichever environment is active.
+func (r *RequestBuilder) renderHeadersTab(startScreenRow int) string {
+	var b strings.Builder
+
+	used := strings.Count(b.String(), "\n")
+	editorHeight := r.height - (startScreenRow + used) - 2
+	if editorHeight < 4 {
+		editorHeight = 4
+	}
+	r.headersEditor.SetSize(r.width-2, editorHeight)
+	b.WriteString(r.headersEditor.View())
+	b.WriteString("\n")
+	b.WriteString(shared.DimStyle.Render("[ctrl+s] save  "))
+	b.WriteString(r.headersEditor.Hint())
+	return b.String()
 }
 
 // renderBodyTab renders the request body tab. The body is edited inline via

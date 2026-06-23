@@ -20,6 +20,11 @@ type HelpSection struct {
 // helpSections is the registry. Add an entry per topic as the docs grow.
 var helpSections = []HelpSection{
 	{
+		Title:   "Environment variables",
+		Summary: "Referencing ${vars} in headers, params, and the base URL",
+		Body:    environmentHelpText,
+	},
+	{
 		Title:   "Scripts",
 		Summary: "Writing pre/post-request JavaScript hooks",
 		Body:    scriptsHelpText,
@@ -177,7 +182,7 @@ func (h *HelpPanel) ViewModal(screenWidth, screenHeight int) string {
 
 	titleText := "Help"
 	if h.viewing && h.activeSection >= 0 && h.activeSection < len(h.sections) {
-		titleText = "Help — " + h.sections[h.activeSection].Title
+		titleText = "Help: " + h.sections[h.activeSection].Title
 	}
 
 	var b strings.Builder
@@ -257,16 +262,41 @@ func (h *HelpPanel) renderSectionList(contentWidth, rows int) string {
 		return shared.DimStyle.Render("(no help sections yet)")
 	}
 
+	// Lay the list out as two aligned columns: the section title and its
+	// summary. The title column is sized to the longest title (so nothing is
+	// clipped while there's room), and the summary wraps within whatever's
+	// left, with continuation lines hanging-indented to the summary column.
+	const cursorW = 2 // "> " / "  "
+	const gapW = 2    // gap between the title and summary columns
+
+	titleW := 0
+	for _, s := range h.sections {
+		if w := lipgloss.Width(s.Title); w > titleW {
+			titleW = w
+		}
+	}
+	// Never let the title column crowd out the summary; keep at least 20
+	// columns for the wrapped summary text.
+	if maxTitleW := contentWidth - cursorW - gapW - 20; maxTitleW > 0 && titleW > maxTitleW {
+		titleW = maxTitleW
+	}
+	summaryW := contentWidth - cursorW - titleW - gapW
+	if summaryW < 1 {
+		summaryW = 1
+	}
+	indent := strings.Repeat(" ", cursorW+titleW+gapW)
+
 	var b strings.Builder
 	// Section rows begin at modal-content row 2 (title row 0, divider 1).
 	const firstRowY = 2
+	y := firstRowY
 	for i, s := range h.sections {
-		// Reserve room for cursor + space.
-		titleW := 18
-		title := s.Title
-		if len(title) > titleW-2 {
-			title = title[:titleW-3] + "…"
+		title := truncateToWidth(s.Title, titleW)
+		summaryLines := wrapWords(s.Summary, summaryW)
+		if len(summaryLines) == 0 {
+			summaryLines = []string{""}
 		}
+
 		var line strings.Builder
 		if i == h.cursor {
 			line.WriteString(shared.CursorStyle.Render("> "))
@@ -275,24 +305,75 @@ func (h *HelpPanel) renderSectionList(contentWidth, rows int) string {
 			line.WriteString("  ")
 			line.WriteString(shared.NormalStyle.Render(padRightS(title, titleW)))
 		}
-		line.WriteString("  ")
-		line.WriteString(shared.DimStyle.Render(s.Summary))
-		h.clickMap.AddRow(firstRowY+i, i)
+		line.WriteString(strings.Repeat(" ", gapW))
+		line.WriteString(shared.DimStyle.Render(summaryLines[0]))
 		b.WriteString(line.String())
 		b.WriteString("\n")
+		// The whole section (title row + any wrapped summary rows) selects it.
+		h.clickMap.AddRow(y, i)
+		y++
+
+		for _, extra := range summaryLines[1:] {
+			b.WriteString(indent)
+			b.WriteString(shared.DimStyle.Render(extra))
+			b.WriteString("\n")
+			h.clickMap.AddRow(y, i)
+			y++
+		}
 	}
 	// Pad remaining rows so the hint line sits at the bottom of the modal.
-	for i := len(h.sections); i < rows-1; i++ {
+	for printed := y - firstRowY; printed < rows-1; printed++ {
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
 func padRightS(s string, w int) string {
-	if len(s) >= w {
+	if lipgloss.Width(s) >= w {
 		return s
 	}
-	return s + strings.Repeat(" ", w-len(s))
+	return s + strings.Repeat(" ", w-lipgloss.Width(s))
+}
+
+// truncateToWidth clips s to at most w display columns, appending an ellipsis
+// when it has to cut. Used so a too-long section title degrades gracefully
+// instead of breaking column alignment.
+func truncateToWidth(s string, w int) string {
+	if w <= 0 || lipgloss.Width(s) <= w {
+		return s
+	}
+	if w == 1 {
+		return "…"
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
+}
+
+// wrapWords greedily wraps s onto lines no wider than w columns, breaking on
+// spaces. A single word longer than w is left intact on its own line rather
+// than being split mid-word.
+func wrapWords(s string, w int) []string {
+	if w <= 0 {
+		return []string{s}
+	}
+	words := strings.Fields(s)
+	if len(words) == 0 {
+		return nil
+	}
+	var lines []string
+	cur := words[0]
+	for _, word := range words[1:] {
+		if lipgloss.Width(cur)+1+lipgloss.Width(word) <= w {
+			cur += " " + word
+		} else {
+			lines = append(lines, cur)
+			cur = word
+		}
+	}
+	return append(lines, cur)
 }
 
 // Suppress unused-import warning for `key`; reserved for keymap integration

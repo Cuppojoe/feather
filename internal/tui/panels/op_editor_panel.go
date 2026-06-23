@@ -13,8 +13,9 @@ import (
 	"github.com/cuppojoe/feather/internal/tui/shared"
 )
 
-// Row kinds in the op editor. Fixed fields first, then dynamic query-param and
-// header rows interleaved with their "add" actions.
+// Row kinds in the op editor. Fixed fields first, then dynamic query-param
+// rows with an "add" action. Headers live in a separate KVEditor section
+// rendered below the field rows.
 type editRowKind int
 
 const (
@@ -25,14 +26,12 @@ const (
 	rowDescription
 	rowQueryParam
 	rowAddQuery
-	rowHeader
-	rowAddHeader
 )
 
 // editRow describes one focusable line in the editor.
 type editRow struct {
 	kind editRowKind
-	idx  int // index into queryParams/headers for rowQueryParam/rowHeader
+	idx  int // index into queryParams for rowQueryParam
 }
 
 // OpEditorPanel is a modal form for creating or editing an overlay request.
@@ -48,20 +47,24 @@ type OpEditorPanel struct {
 
 	method, path, category, summary, description string
 	queryParams                                  []string // names
-	headers                                      []string // "key: value"
 
 	rows    []editRow
 	cursor  int
 	editing bool
 	input   textinput.Model
 	status  string
+
+	// Headers section uses the shared KVEditor. inHeaders is true when
+	// keyboard focus is in the editor (vs. the field rows above it).
+	headersEditor shared.KVEditor
+	inHeaders     bool
 }
 
 // NewOpEditorPanel constructs the editor (closed).
 func NewOpEditorPanel(keys shared.KeyMap) *OpEditorPanel {
 	ti := textinput.New()
 	ti.CharLimit = 400
-	return &OpEditorPanel{keys: keys, input: ti}
+	return &OpEditorPanel{keys: keys, input: ti, headersEditor: shared.NewKVEditor()}
 }
 
 func (p *OpEditorPanel) IsExpanded() bool { return p.expanded }
@@ -113,8 +116,8 @@ func (p *OpEditorPanel) OpenEdit(ep *openapi.Endpoint, ovr *overlay.OpOverride, 
 		if ovr.Tag != "" {
 			p.category = ovr.Tag
 		}
-		for k, v := range ovr.Headers {
-			p.headers = append(p.headers, k+": "+v)
+		if len(ovr.Headers) > 0 {
+			p.headersEditor.SetValues(ovr.Headers)
 		}
 	}
 	p.rebuildRows()
@@ -129,8 +132,9 @@ func (p *OpEditorPanel) reset() {
 	p.origMethod, p.origPath = "", ""
 	p.method, p.path, p.category, p.summary, p.description = "", "", "", "", ""
 	p.queryParams = nil
-	p.headers = nil
 	p.input.Blur()
+	p.headersEditor = shared.NewKVEditor()
+	p.inHeaders = false
 }
 
 // rebuildRows recomputes the focusable row list from current state and kind.
@@ -142,10 +146,6 @@ func (p *OpEditorPanel) rebuildRows() {
 		}
 		rows = append(rows, editRow{kind: rowAddQuery})
 	}
-	for i := range p.headers {
-		rows = append(rows, editRow{kind: rowHeader, idx: i})
-	}
-	rows = append(rows, editRow{kind: rowAddHeader})
 	p.rows = rows
 	if p.cursor >= len(rows) {
 		p.cursor = len(rows) - 1
@@ -157,7 +157,7 @@ func (p *OpEditorPanel) editable(r editRow) bool {
 	switch r.kind {
 	case rowMethod, rowPath:
 		return p.created // imported: identity is fixed
-	case rowAddQuery, rowAddHeader:
+	case rowAddQuery:
 		return false
 	default:
 		return true
@@ -174,6 +174,7 @@ func (p *OpEditorPanel) Update(msg tea.Msg) OpEditorResult {
 		return OpEditorResult{}
 	}
 
+	// Inline edit on a field row owns the keys outright.
 	if p.editing {
 		switch key.String() {
 		case "enter":
@@ -191,6 +192,32 @@ func (p *OpEditorPanel) Update(msg tea.Msg) OpEditorResult {
 		return OpEditorResult{}
 	}
 
+	// Headers focus: forward most keys to the KV editor, but reserve a few
+	// for the modal itself (ctrl+s to save, esc to close or cancel an
+	// in-cell edit, shift+tab/up at the top to exit the section).
+	if p.inHeaders {
+		ks := key.String()
+		switch ks {
+		case "ctrl+s":
+			return p.submit()
+		case "esc":
+			if p.headersEditor.IsEditing() {
+				// Let the kv editor cancel the inline edit first.
+				cmd := p.headersEditor.Update(msg)
+				return OpEditorResult{Cmd: cmd}
+			}
+			p.expanded = false
+			return OpEditorResult{}
+		case "shift+tab":
+			if !p.headersEditor.IsEditing() {
+				p.exitHeaders()
+				return OpEditorResult{}
+			}
+		}
+		cmd := p.headersEditor.Update(msg)
+		return OpEditorResult{Cmd: cmd}
+	}
+
 	switch key.String() {
 	case "esc":
 		p.expanded = false
@@ -204,6 +231,9 @@ func (p *OpEditorPanel) Update(msg tea.Msg) OpEditorResult {
 	case "down", "tab":
 		if p.cursor < len(p.rows)-1 {
 			p.cursor++
+		} else {
+			// Walking off the bottom drops focus into the headers editor.
+			p.enterHeaders()
 		}
 	case "d":
 		p.deleteRow()
@@ -211,6 +241,21 @@ func (p *OpEditorPanel) Update(msg tea.Msg) OpEditorResult {
 		p.activateRow()
 	}
 	return OpEditorResult{}
+}
+
+// enterHeaders moves focus from the field rows into the KV editor.
+func (p *OpEditorPanel) enterHeaders() {
+	p.inHeaders = true
+	p.headersEditor.Focus()
+}
+
+// exitHeaders returns focus to the last field row.
+func (p *OpEditorPanel) exitHeaders() {
+	p.inHeaders = false
+	p.headersEditor.Blur()
+	if len(p.rows) > 0 {
+		p.cursor = len(p.rows) - 1
+	}
 }
 
 // activateRow edits the focused row, or runs its "add" action.
@@ -222,16 +267,6 @@ func (p *OpEditorPanel) activateRow() {
 		p.rebuildRows()
 		for i, row := range p.rows {
 			if row.kind == rowQueryParam && row.idx == len(p.queryParams)-1 {
-				p.cursor = i
-				break
-			}
-		}
-		p.startEdit("")
-	case rowAddHeader:
-		p.headers = append(p.headers, "")
-		p.rebuildRows()
-		for i, row := range p.rows {
-			if row.kind == rowHeader && row.idx == len(p.headers)-1 {
 				p.cursor = i
 				break
 			}
@@ -251,15 +286,11 @@ func (p *OpEditorPanel) startEdit(val string) {
 	p.input.Focus()
 }
 
-// deleteRow removes the focused query-param or header row.
+// deleteRow removes the focused query-param row.
 func (p *OpEditorPanel) deleteRow() {
 	r := p.rows[p.cursor]
-	switch r.kind {
-	case rowQueryParam:
+	if r.kind == rowQueryParam {
 		p.queryParams = append(p.queryParams[:r.idx], p.queryParams[r.idx+1:]...)
-		p.rebuildRows()
-	case rowHeader:
-		p.headers = append(p.headers[:r.idx], p.headers[r.idx+1:]...)
 		p.rebuildRows()
 	}
 }
@@ -279,8 +310,6 @@ func (p *OpEditorPanel) rowValue(r editRow) string {
 		return p.description
 	case rowQueryParam:
 		return p.queryParams[r.idx]
-	case rowHeader:
-		return p.headers[r.idx]
 	}
 	return ""
 }
@@ -302,8 +331,6 @@ func (p *OpEditorPanel) commitInput() {
 		p.description = v
 	case rowQueryParam:
 		p.queryParams[r.idx] = v
-	case rowHeader:
-		p.headers[r.idx] = v
 	}
 }
 
@@ -335,6 +362,11 @@ func (p *OpEditorPanel) submit() OpEditorResult {
 		Path:       path,
 	}
 
+	headers := p.headersEditor.Values()
+	if len(headers) == 0 {
+		headers = nil
+	}
+
 	if p.created {
 		op := overlay.AddedOp{
 			Method:      method,
@@ -342,7 +374,7 @@ func (p *OpEditorPanel) submit() OpEditorResult {
 			Tag:         category,
 			Summary:     strings.TrimSpace(p.summary),
 			Description: strings.TrimSpace(p.description),
-			Headers:     p.headerMap(),
+			Headers:     headers,
 		}
 		for _, v := range openapi.ExtractPathVariables(path) {
 			op.Parameters = append(op.Parameters, overlay.AddedParam{Name: v, In: "path", Required: true})
@@ -358,31 +390,11 @@ func (p *OpEditorPanel) submit() OpEditorResult {
 			Summary:     strings.TrimSpace(p.summary),
 			Description: strings.TrimSpace(p.description),
 			Tag:         category,
-			Headers:     p.headerMap(),
+			Headers:     headers,
 		}
 	}
 	p.expanded = false
 	return res
-}
-
-// headerMap parses the "key: value" header rows into a map (skipping blanks).
-func (p *OpEditorPanel) headerMap() map[string]string {
-	var m map[string]string
-	for _, h := range p.headers {
-		k, v, found := strings.Cut(h, ":")
-		k = strings.TrimSpace(k)
-		if k == "" {
-			continue
-		}
-		if !found {
-			v = ""
-		}
-		if m == nil {
-			m = map[string]string{}
-		}
-		m[k] = strings.TrimSpace(v)
-	}
-	return m
 }
 
 // ViewModal renders the editor.
@@ -407,7 +419,7 @@ func (p *OpEditorPanel) ViewModal(screenWidth, screenHeight int) string {
 
 	var lines []string
 	for i, r := range p.rows {
-		focused := i == p.cursor
+		focused := !p.inHeaders && i == p.cursor
 		cursor := "  "
 		ls := labelStyle
 		if focused {
@@ -415,12 +427,8 @@ func (p *OpEditorPanel) ViewModal(screenWidth, screenHeight int) string {
 			ls = ls.Foreground(shared.ColorPrimary).Bold(true)
 		}
 
-		switch r.kind {
-		case rowAddQuery:
+		if r.kind == rowAddQuery {
 			lines = append(lines, cursor+shared.DimStyle.Render("+ add query param"))
-			continue
-		case rowAddHeader:
-			lines = append(lines, cursor+shared.DimStyle.Render("+ add header"))
 			continue
 		}
 
@@ -450,22 +458,63 @@ func (p *OpEditorPanel) ViewModal(screenWidth, screenHeight int) string {
 	}
 	body := strings.Join(lines, "\n")
 
+	// Headers section: the KV editor with a small header label so the
+	// transition from field rows is obvious. The arrow next to "Headers"
+	// flips when focus has moved into the section.
+	headersLabel := "Headers"
+	if p.inHeaders {
+		headersLabel = "▸ Headers"
+	}
+	headersHeading := lipgloss.NewStyle().Foreground(shared.ColorMuted).Bold(true).
+		Render(headersLabel)
+	// Allocate a modest height for the KV editor; it scrolls internally.
+	kvHeight := 6 + len(p.queryParams)/2
+	if kvHeight < 6 {
+		kvHeight = 6
+	}
+	if kvHeight > 10 {
+		kvHeight = 10
+	}
+	p.headersEditor.SetSize(contentWidth, kvHeight)
+	headersView := p.headersEditor.View()
+
 	status := ""
 	if p.status != "" {
 		status = lipgloss.NewStyle().Foreground(shared.ColorError).
 			Width(contentWidth).Align(lipgloss.Center).Render(p.status)
 	}
 
-	hintItems := []shared.Hint{
-		{Key: "enter", Label: "edit"},
-		{Key: "d", Label: "del row"},
-		{Key: "ctrl+s", Label: "save"},
-		{Key: "esc", Label: "cancel"},
+	var hintItems []shared.Hint
+	if p.inHeaders {
+		// KVEditor publishes its own keybinding hint; let it own the line
+		// when focused.
+		hintItems = []shared.Hint{
+			{Key: "shift+tab", Label: "back"},
+			{Key: "ctrl+s", Label: "save"},
+			{Key: "esc", Label: "cancel"},
+		}
+	} else {
+		hintItems = []shared.Hint{
+			{Key: "enter", Label: "edit"},
+			{Key: "d", Label: "del row"},
+			{Key: "tab", Label: "headers"},
+			{Key: "ctrl+s", Label: "save"},
+			{Key: "esc", Label: "cancel"},
+		}
 	}
 	hint := lipgloss.NewStyle().Foreground(shared.ColorMuted).Width(contentWidth).Align(lipgloss.Center).
 		Render(hintText(hintItems))
 
-	content := lipgloss.JoinVertical(lipgloss.Left, title, divider, body, status, hint)
+	parts := []string{title, divider, body, "", headersHeading, headersView}
+	if p.inHeaders {
+		parts = append(parts, p.headersEditor.Hint())
+	}
+	if status != "" {
+		parts = append(parts, status)
+	}
+	parts = append(parts, hint)
+
+	content := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(shared.ColorPrimary).
@@ -488,8 +537,6 @@ func (p *OpEditorPanel) rowLabelValue(r editRow) (string, string) {
 		return "Description", p.description
 	case rowQueryParam:
 		return "Query", p.queryParams[r.idx]
-	case rowHeader:
-		return "Header", p.headers[r.idx]
 	}
 	return "", ""
 }

@@ -140,14 +140,14 @@ func TestContextGetSet(t *testing.T) {
 		Context:  ctx,
 	}
 	Run(context.Background(), `
-		feather.context.set("k", "v1");
+		feather.environment.set("k", "v1");
 	`, env, time.Second)
 	if ctx.Get("k") != "v1" {
 		t.Fatalf("expected v1, got %q", ctx.Get("k"))
 	}
 	res := Run(context.Background(), `
-		if (feather.context.get("k") !== "v1") feather.abort("read failed");
-		feather.context.delete("k");
+		if (feather.environment.get("k") !== "v1") feather.abort("read failed");
+		feather.environment.delete("k");
 	`, env, time.Second)
 	if res.Aborted {
 		t.Fatalf("aborted: %s", res.Reason)

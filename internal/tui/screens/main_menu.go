@@ -87,12 +87,12 @@ func NewMainMenu(tags []openapi.TagGroup, keys shared.KeyMap, ov *overlay.Overla
 
 	preEditor := shared.NewTextEditor(40, 10)
 	preEditor.SetLanguage("javascript")
-	preEditor.SetPlaceholder("// JS pre-request hook — runs for every request this profile sends")
+	preEditor.SetPlaceholder("// JS pre-request hook, runs for every request this profile sends")
 	preEditor.SetExternalEditorID(editorCallerProfileScriptPre)
 	preEditor.SetExternalEditorExt(".js")
 	postEditor := shared.NewTextEditor(40, 10)
 	postEditor.SetLanguage("javascript")
-	postEditor.SetPlaceholder("// JS post-request hook — runs after every response this profile receives")
+	postEditor.SetPlaceholder("// JS post-request hook, runs after every response this profile receives")
 	postEditor.SetExternalEditorID(editorCallerProfileScriptPost)
 	postEditor.SetExternalEditorExt(".js")
 	if ov != nil {
